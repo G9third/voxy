@@ -66,11 +66,13 @@ public class ModelFactory {
     public static final int MODEL_TEXTURE_SIZE = 16;
 
     // Position-aware biome tint compatibility mode.
-    // Biome-tinted LOD models use a fixed 512-entry RGB333 palette, and
+    // Biome-tinted LOD models share one fixed 512-entry RGB333 palette.
     // RenderDataFactory writes the palette index produced from BlockColors
     // at the actual LOD sample world position into the quad biome-id bits.
     public static final boolean USE_POSITION_TINT_PALETTE = true;
     public static final int POSITION_TINT_PALETTE_SIZE = 512;
+    public static final int POSITION_TINT_PALETTE_INDEX = 0;
+    public static final int POSITION_TINT_FALLBACK_INDEX = POSITION_TINT_PALETTE_SIZE - 1;
 
     public static final int LAYERS = Integer.numberOfTrailingZeros(MODEL_TEXTURE_SIZE);
 
@@ -138,6 +140,8 @@ public class ModelFactory {
     private final ConcurrentLinkedDeque<BlockBake> bakeQueue = new ConcurrentLinkedDeque<>();
 
     private final ConcurrentLinkedDeque<ResultUploader> uploadResults = new ConcurrentLinkedDeque<>();
+
+    private boolean positionTintPaletteUploaded = false;
 
     private Object2IntMap<BlockState> customBlockStateIdMapping;
 
@@ -659,14 +663,10 @@ public class ModelFactory {
             MemoryUtil.memPutInt(uploadPtr, entry.tintingColour);
         } else if (USE_POSITION_TINT_PALETTE) {
             // Position-aware tinting mode: use the quad biome-id bits as an RGB333 palette index.
-            // RenderDataFactory computes that palette index from the actual world position.
-            int colourIndex = this.modelsRequiringBiomeColours.size() * POSITION_TINT_PALETTE_SIZE;
-            MemoryUtil.memPutInt(uploadPtr, colourIndex);
-            this.modelsRequiringBiomeColours.add(new Pair<>(modelId, blockState));
-
-            uploadResult.biomeUploadIndex = colourIndex;
-            long clrUploadPtr = (uploadResult.biomeUpload = new MemoryBuffer(4L * POSITION_TINT_PALETTE_SIZE)).address;
-            writePositionTintPalette(clrUploadPtr);
+            // All tinted models point at the same shared palette; RenderDataFactory computes
+            // the per-quad palette index from the actual LOD sample world position.
+            MemoryUtil.memPutInt(uploadPtr, POSITION_TINT_PALETTE_INDEX);
+            this.queuePositionTintPaletteUpload(uploadResult);
         } else {
             //Populate the list of biomes for the model state
             int biomeIndex = this.modelsRequiringBiomeColours.size() * this.biomes.size();
@@ -748,6 +748,16 @@ public class ModelFactory {
         return Math.clamp(state.getLightEmission(),0,15);
     }
 
+    private void queuePositionTintPaletteUpload(ModelBakeResultUpload uploadResult) {
+        if (this.positionTintPaletteUploaded) {
+            return;
+        }
+        this.positionTintPaletteUploaded = true;
+        uploadResult.biomeUploadIndex = POSITION_TINT_PALETTE_INDEX;
+        long clrUploadPtr = (uploadResult.biomeUpload = new MemoryBuffer(4L * POSITION_TINT_PALETTE_SIZE)).address;
+        writePositionTintPalette(clrUploadPtr);
+    }
+
     private static void writePositionTintPalette(long ptr) {
         for (int i = 0; i < POSITION_TINT_PALETTE_SIZE; i++) {
             MemoryUtil.memPutInt(ptr + i * 4L, positionTintPaletteColour(i) | 0xFF000000);
@@ -767,7 +777,7 @@ public class ModelFactory {
         }
         var level = Minecraft.getInstance().level;
         if (level == null) {
-            return -1;
+            return POSITION_TINT_FALLBACK_INDEX;
         }
         BlockState state = this.mapper.getBlockStateFromBlockId(blockId);
         int color;
@@ -777,10 +787,10 @@ public class ModelFactory {
                 color = Minecraft.getInstance().getBlockColors().getColor(state, level, pos, 1);
             }
         } catch (Throwable throwable) {
-            return -1;
+            return POSITION_TINT_FALLBACK_INDEX;
         }
         if (color == -1) {
-            return -1;
+            return POSITION_TINT_FALLBACK_INDEX;
         }
         return quantizePositionTintColour(color);
     }
